@@ -7,6 +7,8 @@ import jwt
 from datetime import datetime, timedelta
 import os
 from dotenv import load_dotenv
+from predictor import extract_text_and_predict
+import io
 
 # Load environment variables
 load_dotenv()
@@ -18,6 +20,7 @@ CORS(app)
 client = MongoClient(os.getenv('MONGODB_URI', 'mongodb://localhost:27017/'))
 db = client['prescription_system']
 users_collection = db['users']
+history_collection = db['prediction_history']
 
 # JWT configuration
 JWT_SECRET = os.getenv('JWT_SECRET', 'your-secret-key')
@@ -213,19 +216,345 @@ def update_user_status(user_id):
 @app.route('/api/dashboard/stats', methods=['GET'])
 def get_dashboard_stats():
     try:
-        # Get total users count
+        # Get user ID from token
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({'error': 'No authorization token provided'}), 401
+
+        token = auth_header.split(' ')[1]
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            user_id = payload['user_id']
+        except jwt.InvalidTokenError:
+            return jsonify({'error': 'Invalid token'}), 401
+
+        # Get total uploads
+        total_uploads = history_collection.count_documents({'user_id': ObjectId(user_id)})
+
+        # Get last upload
+        last_upload = history_collection.find_one(
+            {'user_id': ObjectId(user_id)},
+            sort=[('created_at', -1)]
+        )
+
+        # Get recent scans (last 5)
+        recent_scans = list(history_collection.find(
+            {'user_id': ObjectId(user_id)},
+            sort=[('created_at', -1)],
+            limit=5
+        ))
+
+        # Calculate success rate (entries with found drugs)
+        successful_scans = history_collection.count_documents({
+            'user_id': ObjectId(user_id),
+            'found_drugs': {'$ne': []}  # entries that have found drugs
+        })
+        success_rate = (successful_scans / total_uploads * 100) if total_uploads > 0 else 0
+
+        # Format last upload and recent scans
+        if last_upload:
+            last_upload['_id'] = str(last_upload['_id'])
+            last_upload['user_id'] = str(last_upload['user_id'])
+            last_upload['created_at'] = last_upload['created_at'].isoformat()
+
+        for scan in recent_scans:
+            scan['_id'] = str(scan['_id'])
+            scan['user_id'] = str(scan['user_id'])
+            scan['created_at'] = scan['created_at'].isoformat()
+
+        return jsonify({
+            'total_uploads': total_uploads,
+            'last_upload': last_upload,
+            'recent_scans': recent_scans,
+            'success_rate': round(success_rate, 1)
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/predict', methods=['POST'])
+def predict():
+    try:
+        if 'image' not in request.files:
+            return jsonify({'error': 'No image file provided'}), 400
+
+        # Get user ID from token
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({'error': 'No authorization token provided'}), 401
+
+        token = auth_header.split(' ')[1]
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            user_id = payload['user_id']
+        except jwt.InvalidTokenError:
+            return jsonify({'error': 'Invalid token'}), 401
+
+        image_file = request.files['image']
+        if not image_file:
+            return jsonify({'error': 'Empty image file'}), 400
+
+        # Convert the file to bytes
+        image_bytes = io.BytesIO(image_file.read())
+        
+        # Get predictions
+        ocr_text, predicted_text, found_drugs, ocr_confidence, drug_confidence = extract_text_and_predict(image_bytes)
+
+        # Store in history
+        history_entry = {
+            'user_id': ObjectId(user_id),
+            'ocr_text': ocr_text,
+            'found_drugs': found_drugs,
+            'ocr_confidence': ocr_confidence,
+            'drug_confidence': drug_confidence,
+            'created_at': datetime.utcnow()
+        }
+        history_collection.insert_one(history_entry)
+
+        return jsonify({
+            'ocr_text': ocr_text,
+            'predicted_text': predicted_text,
+            'found_drugs': found_drugs,
+            'ocr_confidence': ocr_confidence,
+            'drug_confidence': drug_confidence
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/history', methods=['GET'])
+def get_history():
+    try:
+        # Get user ID from token
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({'error': 'No authorization token provided'}), 401
+
+        token = auth_header.split(' ')[1]
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            user_id = payload['user_id']
+        except jwt.InvalidTokenError:
+            return jsonify({'error': 'Invalid token'}), 401
+
+        # Get history entries for the user
+        history = list(history_collection.find(
+            {'user_id': ObjectId(user_id)},
+            sort=[('created_at', -1)]  # Sort by most recent first
+        ))
+
+        # Convert ObjectId and datetime to strings for JSON serialization
+        for entry in history:
+            entry['_id'] = str(entry['_id'])
+            entry['user_id'] = str(entry['user_id'])
+            entry['created_at'] = entry['created_at'].isoformat()
+
+        return jsonify({
+            'history': history
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/logs', methods=['GET'])
+def get_all_logs():
+    try:
+        # Get user ID from token
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({'error': 'No authorization token provided'}), 401
+
+        token = auth_header.split(' ')[1]
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            user_id = payload['user_id']
+            
+            # Check if user is admin
+            user = users_collection.find_one({'_id': ObjectId(user_id)})
+            if not user or user.get('role') != 'admin':
+                return jsonify({'error': 'Unauthorized access'}), 403
+                
+        except jwt.InvalidTokenError:
+            return jsonify({'error': 'Invalid token'}), 401
+
+        # Get all prescription logs with user information
+        logs = list(history_collection.aggregate([
+            {
+                '$lookup': {
+                    'from': 'users',
+                    'localField': 'user_id',
+                    'foreignField': '_id',
+                    'as': 'user'
+                }
+            },
+            {
+                '$unwind': '$user'
+            },
+            {
+                '$project': {
+                    '_id': 1,
+                    'ocr_text': 1,
+                    'found_drugs': 1,
+                    'created_at': 1,
+                    'user': {
+                        'name': 1,
+                        'email': 1
+                    }
+                }
+            },
+            {
+                '$sort': {'created_at': -1}
+            }
+        ]))
+
+        # Convert ObjectId and datetime to strings for JSON serialization
+        for log in logs:
+            log['_id'] = str(log['_id'])
+            log['created_at'] = log['created_at'].isoformat()
+
+        return jsonify({
+            'logs': logs
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/dashboard/stats', methods=['GET'])
+def get_admin_dashboard_stats():
+    try:
+        # Get user ID from token
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({'error': 'No authorization token provided'}), 401
+
+        token = auth_header.split(' ')[1]
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            user_id = payload['user_id']
+            
+            # Check if user is admin
+            user = users_collection.find_one({'_id': ObjectId(user_id)})
+            if not user or user.get('role') != 'admin':
+                return jsonify({'error': 'Unauthorized access'}), 403
+                
+        except jwt.InvalidTokenError:
+            return jsonify({'error': 'Invalid token'}), 401
+
+        # Get total users
         total_users = users_collection.count_documents({})
         
-        # Get active users count
-        active_users = users_collection.count_documents({'status': 'active'})
+        # Get total scans
+        total_scans = history_collection.count_documents({})
         
-        # Get inactive users count
-        inactive_users = users_collection.count_documents({'status': 'inactive'})
+        # Get successful scans (with found drugs)
+        successful_scans = history_collection.count_documents({
+            'found_drugs': {'$ne': []}
+        })
+        
+        # Calculate success rate
+        success_rate = (successful_scans / total_scans * 100) if total_scans > 0 else 0
+        
+        # Get recent activity (last 10 scans with user info)
+        recent_activity = list(history_collection.aggregate([
+            {
+                '$lookup': {
+                    'from': 'users',
+                    'localField': 'user_id',
+                    'foreignField': '_id',
+                    'as': 'user'
+                }
+            },
+            {
+                '$unwind': '$user'
+            },
+            {
+                '$project': {
+                    '_id': 1,
+                    'created_at': 1,
+                    'found_drugs': 1,
+                    'user': {
+                        'name': 1,
+                        'email': 1
+                    }
+                }
+            },
+            {
+                '$sort': {'created_at': -1}
+            },
+            {
+                '$limit': 10
+            }
+        ]))
+
+        # Get scans per day for the last 7 days
+        from datetime import datetime, timedelta
+        scans_per_day = []
+        for i in range(7):
+            date = datetime.utcnow() - timedelta(days=i)
+            start_of_day = date.replace(hour=0, minute=0, second=0, microsecond=0)
+            end_of_day = start_of_day + timedelta(days=1)
+            
+            daily_scans = history_collection.count_documents({
+                'created_at': {
+                    '$gte': start_of_day,
+                    '$lt': end_of_day
+                }
+            })
+            
+            scans_per_day.append({
+                'date': date.strftime('%b %d'),
+                'scans': daily_scans
+            })
+        
+        # Reverse to show oldest to newest
+        scans_per_day.reverse()
+
+        # Get accuracy trends (success rate per day for last 7 days)
+        accuracy_trends = []
+        for i in range(7):
+            date = datetime.utcnow() - timedelta(days=i)
+            start_of_day = date.replace(hour=0, minute=0, second=0, microsecond=0)
+            end_of_day = start_of_day + timedelta(days=1)
+            
+            daily_total = history_collection.count_documents({
+                'created_at': {
+                    '$gte': start_of_day,
+                    '$lt': end_of_day
+                }
+            })
+            
+            daily_successful = history_collection.count_documents({
+                'created_at': {
+                    '$gte': start_of_day,
+                    '$lt': end_of_day
+                },
+                'found_drugs': {'$ne': []}
+            })
+            
+            daily_accuracy = (daily_successful / daily_total * 100) if daily_total > 0 else 0
+            
+            accuracy_trends.append({
+                'date': date.strftime('%b %d'),
+                'accuracy': round(daily_accuracy, 1)
+            })
+        
+        # Reverse to show oldest to newest
+        accuracy_trends.reverse()
+
+        # Format recent activity
+        for activity in recent_activity:
+            activity['_id'] = str(activity['_id'])
+            activity['created_at'] = activity['created_at'].isoformat()
+            activity['status'] = 'Completed' if activity['found_drugs'] else 'Failed'
+            activity['model'] = 'TrOCR'
 
         return jsonify({
             'total_users': total_users,
-            'active_users': active_users,
-            'inactive_users': inactive_users
+            'total_scans': total_scans,
+            'success_rate': round(success_rate, 1),
+            'recent_activity': recent_activity,
+            'scans_per_day': scans_per_day,
+            'accuracy_trends': accuracy_trends
         }), 200
 
     except Exception as e:
