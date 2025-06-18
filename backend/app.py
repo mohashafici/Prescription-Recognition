@@ -1041,6 +1041,147 @@ Success Rate,{success_rate:.1f}%
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/admin/profile', methods=['GET'])
+def get_admin_profile():
+    try:
+        # Get user ID from token
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({'error': 'No authorization token provided'}), 401
+
+        token = auth_header.split(' ')[1]
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            user_id = payload['user_id']
+            
+            # Check if user is admin
+            user = users_collection.find_one({'_id': ObjectId(user_id)})
+            if not user or user.get('role') != 'admin':
+                return jsonify({'error': 'Unauthorized access'}), 403
+                
+        except jwt.InvalidTokenError:
+            return jsonify({'error': 'Invalid token'}), 401
+
+        # Return admin profile data
+        return jsonify({
+            'id': str(user['_id']),
+            'name': user['name'],
+            'email': user['email'],
+            'role': user['role'],
+            'created_at': user['created_at'].isoformat()
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/profile', methods=['PUT'])
+def update_admin_profile():
+    try:
+        # Get user ID from token
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({'error': 'No authorization token provided'}), 401
+
+        token = auth_header.split(' ')[1]
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            user_id = payload['user_id']
+            
+            # Check if user is admin
+            user = users_collection.find_one({'_id': ObjectId(user_id)})
+            if not user or user.get('role') != 'admin':
+                return jsonify({'error': 'Unauthorized access'}), 403
+                
+        except jwt.InvalidTokenError:
+            return jsonify({'error': 'Invalid token'}), 401
+
+        data = request.get_json()
+        
+        # Validate required fields
+        if not data.get('name') or not data.get('email'):
+            return jsonify({'error': 'Name and email are required'}), 400
+
+        # Check if email is already taken by another user
+        existing_user = users_collection.find_one({
+            'email': data['email'],
+            '_id': {'$ne': ObjectId(user_id)}
+        })
+        if existing_user:
+            return jsonify({'error': 'Email already registered'}), 400
+
+        # Update user profile
+        update_data = {
+            'name': data['name'],
+            'email': data['email']
+        }
+        
+        users_collection.update_one(
+            {'_id': ObjectId(user_id)},
+            {'$set': update_data}
+        )
+
+        return jsonify({
+            'message': 'Profile updated successfully',
+            'user': {
+                'id': str(user_id),
+                'name': data['name'],
+                'email': data['email'],
+                'role': user['role']
+            }
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/profile/password', methods=['PUT'])
+def update_admin_password():
+    try:
+        # Get user ID from token
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({'error': 'No authorization token provided'}), 401
+
+        token = auth_header.split(' ')[1]
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            user_id = payload['user_id']
+            
+            # Check if user is admin
+            user = users_collection.find_one({'_id': ObjectId(user_id)})
+            if not user or user.get('role') != 'admin':
+                return jsonify({'error': 'Unauthorized access'}), 403
+                
+        except jwt.InvalidTokenError:
+            return jsonify({'error': 'Invalid token'}), 401
+
+        data = request.get_json()
+        
+        # Validate required fields
+        required_fields = ['currentPassword', 'newPassword']
+        for field in required_fields:
+            if field not in data:
+                return jsonify({'error': f'{field} is required'}), 400
+
+        # Verify current password
+        if not bcrypt.checkpw(data['currentPassword'].encode('utf-8'), user['password']):
+            return jsonify({'error': 'Current password is incorrect'}), 401
+
+        # Hash new password
+        hashed_password = bcrypt.hashpw(data['newPassword'].encode('utf-8'), bcrypt.gensalt())
+
+        # Update password in database
+        users_collection.update_one(
+            {'_id': ObjectId(user_id)},
+            {'$set': {'password': hashed_password}}
+        )
+
+        return jsonify({
+            'message': 'Password updated successfully'
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 if __name__ == '__main__':
     app.run(debug=True, port=5000) 
 
