@@ -883,12 +883,160 @@ def export_report():
         report_type = data.get('type', 'general')
         period = data.get('period', 'month')
         
-        # For now, return a success message
-        # In a real implementation, you would generate and return a CSV/PDF file
-        return jsonify({
-            'message': f'{report_type} report for {period} generated successfully',
-            'download_url': f'/api/admin/reports/download/{report_type}_{period}_{datetime.utcnow().strftime("%Y%m%d")}.csv'
-        }), 200
+        # Calculate date range
+        from datetime import datetime, timedelta
+        now = datetime.utcnow()
+        
+        if period == 'today':
+            start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            end_date = start_date + timedelta(days=1)
+        elif period == 'week':
+            start_date = now - timedelta(days=7)
+            end_date = now
+        elif period == 'month':
+            start_date = now - timedelta(days=30)
+            end_date = now
+        elif period == 'year':
+            start_date = now - timedelta(days=365)
+            end_date = now
+        else:
+            start_date = now - timedelta(days=30)
+            end_date = now
+
+        # Generate CSV content based on report type
+        csv_content = ""
+        filename = f"{report_type}_{period}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+        
+        if report_type == 'general':
+            # General system report
+            total_users = users_collection.count_documents({})
+            total_scans = history_collection.count_documents({
+                'created_at': {'$gte': start_date, '$lt': end_date}
+            })
+            successful_scans = history_collection.count_documents({
+                'created_at': {'$gte': start_date, '$lt': end_date},
+                'found_drugs': {'$ne': []}
+            })
+            success_rate = (successful_scans / total_scans * 100) if total_scans > 0 else 0
+            
+            csv_content = f"""Report Type,General System Report
+Period,{period}
+Generated Date,{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}
+
+Metric,Value
+Total Users,{total_users}
+Total Scans,{total_scans}
+Successful Scans,{successful_scans}
+Success Rate,{success_rate:.1f}%
+"""
+
+        elif report_type == 'recognition':
+            # Recognition performance report
+            csv_content = "Date,Scans,Successful Scans,Accuracy (%)\n"
+            
+            current_date = start_date
+            while current_date < end_date:
+                next_date = current_date + timedelta(days=1)
+                
+                daily_scans = history_collection.count_documents({
+                    'created_at': {'$gte': current_date, '$lt': next_date}
+                })
+                
+                daily_successful = history_collection.count_documents({
+                    'created_at': {'$gte': current_date, '$lt': next_date},
+                    'found_drugs': {'$ne': []}
+                })
+                
+                daily_accuracy = (daily_successful / daily_scans * 100) if daily_scans > 0 else 0
+                
+                csv_content += f"{current_date.strftime('%Y-%m-%d')},{daily_scans},{daily_successful},{daily_accuracy:.1f}\n"
+                
+                current_date = next_date
+
+        elif report_type == 'user_activity':
+            # User activity report
+            csv_content = "User Name,Total Scans,Successful Scans,Success Rate (%)\n"
+            
+            user_activity = list(history_collection.aggregate([
+                {
+                    '$match': {
+                        'created_at': {'$gte': start_date, '$lt': end_date}
+                    }
+                },
+                {
+                    '$lookup': {
+                        'from': 'users',
+                        'localField': 'user_id',
+                        'foreignField': '_id',
+                        'as': 'user'
+                    }
+                },
+                {
+                    '$unwind': '$user'
+                },
+                {
+                    '$group': {
+                        '_id': '$user.name',
+                        'scans': {'$sum': 1},
+                        'successful_scans': {
+                            '$sum': {'$cond': [{'$ne': ['$found_drugs', []]}, 1, 0]}
+                        }
+                    }
+                },
+                {
+                    '$sort': {'scans': -1}
+                }
+            ]))
+            
+            for activity in user_activity:
+                success_rate = (activity['successful_scans'] / activity['scans'] * 100) if activity['scans'] > 0 else 0
+                csv_content += f"{activity['_id']},{activity['scans']},{activity['successful_scans']},{success_rate:.1f}\n"
+
+        elif report_type == 'drug_detection':
+            # Drug detection report
+            csv_content = "Drug Name,Detection Count,Percentage of Total Detections\n"
+            
+            total_detections = history_collection.count_documents({
+                'created_at': {'$gte': start_date, '$lt': end_date},
+                'found_drugs': {'$ne': []}
+            })
+            
+            top_drugs = list(history_collection.aggregate([
+                {
+                    '$match': {
+                        'created_at': {'$gte': start_date, '$lt': end_date},
+                        'found_drugs': {'$ne': []}
+                    }
+                },
+                {
+                    '$unwind': '$found_drugs'
+                },
+                {
+                    '$group': {
+                        '_id': '$found_drugs',
+                        'count': {'$sum': 1}
+                    }
+                },
+                {
+                    '$sort': {'count': -1}
+                }
+            ]))
+            
+            for drug in top_drugs:
+                percentage = (drug['count'] / total_detections * 100) if total_detections > 0 else 0
+                csv_content += f"{drug['_id']},{drug['count']},{percentage:.1f}\n"
+
+        else:
+            return jsonify({'error': 'Invalid report type'}), 400
+
+        # Return the CSV file
+        from flask import Response
+        response = Response(
+            csv_content,
+            mimetype='text/csv',
+            headers={'Content-Disposition': f'attachment; filename={filename}'}
+        )
+        return response
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500

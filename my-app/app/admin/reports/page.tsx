@@ -121,18 +121,40 @@ export default function ReportPage() {
       });
 
       if (!response.ok) {
-        throw new Error('Failed to export report');
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to export report');
       }
 
-      const data = await response.json();
+      // Get the filename from the response headers
+      const contentDisposition = response.headers.get('Content-Disposition');
+      let filename = `${reportType}_${selectedPeriod}_${new Date().toISOString().split('T')[0]}.csv`;
+      
+      if (contentDisposition) {
+        const filenameMatch = contentDisposition.match(/filename=(.+)/);
+        if (filenameMatch) {
+          filename = filenameMatch[1];
+        }
+      }
+
+      // Convert response to blob and download
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+
       toast({
         title: "Success",
-        description: data.message,
+        description: `${reportType} report downloaded successfully`,
       });
     } catch (error) {
       toast({
         title: "Error",
-        description: "Failed to export report",
+        description: error instanceof Error ? error.message : "Failed to export report",
         variant: "destructive",
       });
     }
