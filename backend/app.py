@@ -560,6 +560,257 @@ def get_admin_dashboard_stats():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/admin/reports', methods=['GET'])
+def get_admin_reports():
+    try:
+        # Get user ID from token
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({'error': 'No authorization token provided'}), 401
+
+        token = auth_header.split(' ')[1]
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            user_id = payload['user_id']
+            
+            # Check if user is admin
+            user = users_collection.find_one({'_id': ObjectId(user_id)})
+            if not user or user.get('role') != 'admin':
+                return jsonify({'error': 'Unauthorized access'}), 403
+                
+        except jwt.InvalidTokenError:
+            return jsonify({'error': 'Invalid token'}), 401
+
+        # Get query parameters
+        period = request.args.get('period', 'month')  # today, week, month, year
+        
+        # Calculate date ranges
+        from datetime import datetime, timedelta
+        now = datetime.utcnow()
+        
+        if period == 'today':
+            start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            end_date = start_date + timedelta(days=1)
+        elif period == 'week':
+            start_date = now - timedelta(days=7)
+            end_date = now
+        elif period == 'month':
+            start_date = now - timedelta(days=30)
+            end_date = now
+        elif period == 'year':
+            start_date = now - timedelta(days=365)
+            end_date = now
+        else:
+            start_date = now - timedelta(days=30)
+            end_date = now
+
+        # Get total users
+        total_users = users_collection.count_documents({})
+        
+        # Get total scans in period
+        total_scans = history_collection.count_documents({
+            'created_at': {'$gte': start_date, '$lt': end_date}
+        })
+        
+        # Get successful scans in period
+        successful_scans = history_collection.count_documents({
+            'created_at': {'$gte': start_date, '$lt': end_date},
+            'found_drugs': {'$ne': []}
+        })
+        
+        # Calculate success rate
+        success_rate = (successful_scans / total_scans * 100) if total_scans > 0 else 0
+        
+        # Get average confidence scores
+        avg_ocr_confidence = 0
+        avg_drug_confidence = 0
+        
+        confidence_stats = list(history_collection.aggregate([
+            {
+                '$match': {
+                    'created_at': {'$gte': start_date, '$lt': end_date}
+                }
+            },
+            {
+                '$group': {
+                    '_id': None,
+                    'avg_ocr_confidence': {'$avg': '$ocr_confidence'},
+                    'avg_drug_confidence': {'$avg': '$drug_confidence'}
+                }
+            }
+        ]))
+        
+        if confidence_stats:
+            avg_ocr_confidence = confidence_stats[0].get('avg_ocr_confidence', 0)
+            avg_drug_confidence = confidence_stats[0].get('avg_drug_confidence', 0)
+
+        # Get recognition activity data (daily for the period)
+        recognition_activity = []
+        current_date = start_date
+        while current_date < end_date:
+            next_date = current_date + timedelta(days=1)
+            
+            daily_scans = history_collection.count_documents({
+                'created_at': {'$gte': current_date, '$lt': next_date}
+            })
+            
+            daily_successful = history_collection.count_documents({
+                'created_at': {'$gte': current_date, '$lt': next_date},
+                'found_drugs': {'$ne': []}
+            })
+            
+            daily_accuracy = (daily_successful / daily_scans * 100) if daily_scans > 0 else 0
+            
+            recognition_activity.append({
+                'name': current_date.strftime('%a'),
+                'recognitions': daily_scans,
+                'accuracy': round(daily_accuracy, 1)
+            })
+            
+            current_date = next_date
+
+        # Get prescription distribution (successful vs failed)
+        prescription_distribution = [
+            {
+                'name': 'Successful',
+                'value': successful_scans
+            },
+            {
+                'name': 'Failed',
+                'value': total_scans - successful_scans
+            }
+        ]
+
+        # Get top drugs detected
+        top_drugs = list(history_collection.aggregate([
+            {
+                '$match': {
+                    'created_at': {'$gte': start_date, '$lt': end_date},
+                    'found_drugs': {'$ne': []}
+                }
+            },
+            {
+                '$unwind': '$found_drugs'
+            },
+            {
+                '$group': {
+                    '_id': '$found_drugs',
+                    'count': {'$sum': 1}
+                }
+            },
+            {
+                '$sort': {'count': -1}
+            },
+            {
+                '$limit': 10
+            }
+        ]))
+
+        # Get user activity stats
+        user_activity = list(history_collection.aggregate([
+            {
+                '$match': {
+                    'created_at': {'$gte': start_date, '$lt': end_date}
+                }
+            },
+            {
+                '$lookup': {
+                    'from': 'users',
+                    'localField': 'user_id',
+                    'foreignField': '_id',
+                    'as': 'user'
+                }
+            },
+            {
+                '$unwind': '$user'
+            },
+            {
+                '$group': {
+                    '_id': '$user.name',
+                    'scans': {'$sum': 1},
+                    'successful_scans': {
+                        '$sum': {'$cond': [{'$ne': ['$found_drugs', []]}, 1, 0]}
+                    }
+                }
+            },
+            {
+                '$sort': {'scans': -1}
+            },
+            {
+                '$limit': 5
+            }
+        ]))
+
+        # Calculate period-over-period growth
+        previous_start = start_date - (end_date - start_date)
+        previous_end = start_date
+        
+        previous_scans = history_collection.count_documents({
+            'created_at': {'$gte': previous_start, '$lt': previous_end}
+        })
+        
+        previous_users = users_collection.count_documents({
+            'created_at': {'$gte': previous_start, '$lt': previous_end}
+        })
+        
+        scans_growth = ((total_scans - previous_scans) / previous_scans * 100) if previous_scans > 0 else 0
+        users_growth = ((total_users - previous_users) / previous_users * 100) if previous_users > 0 else 0
+
+        return jsonify({
+            'period': period,
+            'stats': {
+                'total_users': total_users,
+                'total_scans': total_scans,
+                'success_rate': round(success_rate, 1),
+                'avg_ocr_confidence': round(avg_ocr_confidence, 1),
+                'avg_drug_confidence': round(avg_drug_confidence, 1),
+                'scans_growth': round(scans_growth, 1),
+                'users_growth': round(users_growth, 1)
+            },
+            'recognition_activity': recognition_activity,
+            'prescription_distribution': prescription_distribution,
+            'top_drugs': [{'name': drug['_id'], 'count': drug['count']} for drug in top_drugs],
+            'user_activity': user_activity
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/reports/export', methods=['POST'])
+def export_report():
+    try:
+        # Get user ID from token
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({'error': 'No authorization token provided'}), 401
+
+        token = auth_header.split(' ')[1]
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            user_id = payload['user_id']
+            
+            # Check if user is admin
+            user = users_collection.find_one({'_id': ObjectId(user_id)})
+            if not user or user.get('role') != 'admin':
+                return jsonify({'error': 'Unauthorized access'}), 403
+                
+        except jwt.InvalidTokenError:
+            return jsonify({'error': 'Invalid token'}), 401
+
+        data = request.get_json()
+        report_type = data.get('type', 'general')
+        period = data.get('period', 'month')
+        
+        # For now, return a success message
+        # In a real implementation, you would generate and return a CSV/PDF file
+        return jsonify({
+            'message': f'{report_type} report for {period} generated successfully',
+            'download_url': f'/api/admin/reports/download/{report_type}_{period}_{datetime.utcnow().strftime("%Y%m%d")}.csv'
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 if __name__ == '__main__':
     app.run(debug=True, port=5000) 
 

@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import {
@@ -10,7 +10,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Download, Calendar, Users, Activity, FileText } from "lucide-react";
+import { Download, Calendar, Users, Activity, FileText, TrendingUp, TrendingDown } from "lucide-react";
+import { useToast } from "@/components/ui/use-toast";
 import {
   LineChart,
   Line,
@@ -26,26 +27,152 @@ import {
   Cell,
 } from 'recharts';
 
-// Sample data for charts
-const recognitionActivityData = [
-  { name: 'Mon', recognitions: 120, accuracy: 98 },
-  { name: 'Tue', recognitions: 150, accuracy: 97 },
-  { name: 'Wed', recognitions: 180, accuracy: 99 },
-  { name: 'Thu', recognitions: 140, accuracy: 98 },
-  { name: 'Fri', recognitions: 160, accuracy: 98.5 },
-  { name: 'Sat', recognitions: 90, accuracy: 97.5 },
-  { name: 'Sun', recognitions: 70, accuracy: 98 },
-];
+const COLORS = ['#22c55e', '#ef4444', '#3b82f6', '#f59e0b', '#8b5cf6'];
 
-const prescriptionDistributionData = [
-  { name: 'Active', value: 45 },
-  { name: 'Completed', value: 35 },
-  { name: 'Cancelled', value: 20 },
-];
-
-const COLORS = ['#22c55e', '#3b82f6', '#ef4444'];
+interface ReportData {
+  period: string;
+  stats: {
+    total_users: number;
+    total_scans: number;
+    success_rate: number;
+    avg_ocr_confidence: number;
+    avg_drug_confidence: number;
+    scans_growth: number;
+    users_growth: number;
+  };
+  recognition_activity: Array<{
+    name: string;
+    recognitions: number;
+    accuracy: number;
+  }>;
+  prescription_distribution: Array<{
+    name: string;
+    value: number;
+  }>;
+  top_drugs: Array<{
+    name: string;
+    count: number;
+  }>;
+  user_activity: Array<{
+    _id: string;
+    scans: number;
+    successful_scans: number;
+  }>;
+}
 
 export default function ReportPage() {
+  const { toast } = useToast();
+  const [reportData, setReportData] = useState<ReportData | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [selectedPeriod, setSelectedPeriod] = useState('month');
+
+  useEffect(() => {
+    fetchReportData();
+  }, [selectedPeriod]);
+
+  const fetchReportData = async () => {
+    try {
+      setIsLoading(true);
+      const token = localStorage.getItem('token');
+      if (!token) {
+        throw new Error('No authentication token found');
+      }
+
+      const response = await fetch(`http://localhost:5000/api/admin/reports?period=${selectedPeriod}`, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to fetch report data');
+      }
+
+      const data = await response.json();
+      setReportData(data);
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to fetch report data",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleExportReport = async (reportType: string) => {
+    try {
+      const token = localStorage.getItem('token');
+      if (!token) {
+        throw new Error('No authentication token found');
+      }
+
+      const response = await fetch('http://localhost:5000/api/admin/reports/export', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          type: reportType,
+          period: selectedPeriod
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to export report');
+      }
+
+      const data = await response.json();
+      toast({
+        title: "Success",
+        description: data.message,
+      });
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to export report",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const getGrowthIcon = (growth: number) => {
+    if (growth > 0) {
+      return <TrendingUp className="h-4 w-4 text-green-500" />;
+    } else if (growth < 0) {
+      return <TrendingDown className="h-4 w-4 text-red-500" />;
+    }
+    return null;
+  };
+
+  const getGrowthColor = (growth: number) => {
+    if (growth > 0) return 'text-green-600';
+    if (growth < 0) return 'text-red-600';
+    return 'text-gray-600';
+  };
+
+  if (isLoading) {
+    return (
+      <div className="container mx-auto p-6 space-y-6">
+        <div className="flex justify-center items-center h-64">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!reportData) {
+    return (
+      <div className="container mx-auto p-6 space-y-6">
+        <div className="flex justify-center items-center h-64">
+          <p className="text-muted-foreground">No report data available</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="container mx-auto p-6 space-y-6">
       {/* Header Section */}
@@ -53,11 +180,11 @@ export default function ReportPage() {
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Reports & Analytics</h1>
           <p className="text-muted-foreground mt-1">
-            View system analytics and generate reports
+            View system analytics and generate reports for {selectedPeriod}
           </p>
         </div>
         <div className="flex gap-4">
-          <Select defaultValue="month">
+          <Select value={selectedPeriod} onValueChange={setSelectedPeriod}>
             <SelectTrigger className="w-[180px]">
               <Calendar className="mr-2 h-4 w-4" />
               <SelectValue placeholder="Select period" />
@@ -69,7 +196,7 @@ export default function ReportPage() {
               <SelectItem value="year">This Year</SelectItem>
             </SelectContent>
           </Select>
-          <Button>
+          <Button onClick={() => handleExportReport('general')}>
             <Download className="mr-2 h-4 w-4" />
             Export Report
           </Button>
@@ -80,49 +207,58 @@ export default function ReportPage() {
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium">Total Patients</CardTitle>
+            <CardTitle className="text-sm font-medium">Total Users</CardTitle>
             <Users className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">2,543</div>
-            <p className="text-xs text-muted-foreground">
-              +12% from last month
-            </p>
+            <div className="text-2xl font-bold">{reportData.stats.total_users.toLocaleString()}</div>
+            <div className="flex items-center gap-1">
+              {getGrowthIcon(reportData.stats.users_growth)}
+              <p className={`text-xs ${getGrowthColor(reportData.stats.users_growth)}`}>
+                {reportData.stats.users_growth > 0 ? '+' : ''}{reportData.stats.users_growth}% from last {selectedPeriod}
+              </p>
+            </div>
           </CardContent>
         </Card>
+        
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium">Active Prescriptions</CardTitle>
+            <CardTitle className="text-sm font-medium">Total Scans</CardTitle>
             <FileText className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">1,234</div>
-            <p className="text-xs text-muted-foreground">
-              +8% from last month
-            </p>
+            <div className="text-2xl font-bold">{reportData.stats.total_scans.toLocaleString()}</div>
+            <div className="flex items-center gap-1">
+              {getGrowthIcon(reportData.stats.scans_growth)}
+              <p className={`text-xs ${getGrowthColor(reportData.stats.scans_growth)}`}>
+                {reportData.stats.scans_growth > 0 ? '+' : ''}{reportData.stats.scans_growth}% from last {selectedPeriod}
+              </p>
+            </div>
           </CardContent>
         </Card>
+        
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium">Recognition Accuracy</CardTitle>
+            <CardTitle className="text-sm font-medium">Success Rate</CardTitle>
             <Activity className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">98.5%</div>
+            <div className="text-2xl font-bold">{reportData.stats.success_rate}%</div>
             <p className="text-xs text-muted-foreground">
-              +2.3% from last month
+              Average OCR: {reportData.stats.avg_ocr_confidence}%
             </p>
           </CardContent>
         </Card>
+        
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium">System Uptime</CardTitle>
+            <CardTitle className="text-sm font-medium">Drug Detection</CardTitle>
             <Activity className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">99.9%</div>
+            <div className="text-2xl font-bold">{reportData.stats.avg_drug_confidence}%</div>
             <p className="text-xs text-muted-foreground">
-              Last 30 days
+              Average confidence
             </p>
           </CardContent>
         </Card>
@@ -139,7 +275,7 @@ export default function ReportPage() {
             <div className="h-[300px]">
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart
-                  data={recognitionActivityData}
+                  data={reportData.recognition_activity}
                   margin={{
                     top: 5,
                     right: 30,
@@ -194,7 +330,7 @@ export default function ReportPage() {
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
                   <Pie
-                    data={prescriptionDistributionData}
+                    data={reportData.prescription_distribution}
                     cx="50%"
                     cy="50%"
                     innerRadius={60}
@@ -203,7 +339,7 @@ export default function ReportPage() {
                     dataKey="value"
                     label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
                   >
-                    {prescriptionDistributionData.map((entry, index) => (
+                    {reportData.prescription_distribution.map((entry, index) => (
                       <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                     ))}
                   </Pie>
@@ -213,7 +349,6 @@ export default function ReportPage() {
                       border: '1px solid hsl(var(--border))',
                       borderRadius: '6px',
                     }}
-                    formatter={(value) => [`${value}%`, 'Percentage']}
                   />
                 </PieChart>
               </ResponsiveContainer>
@@ -221,6 +356,28 @@ export default function ReportPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Top Drugs Section */}
+      {reportData.top_drugs.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Top Detected Drugs</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {reportData.top_drugs.map((drug, index) => (
+                <div key={drug.name} className="flex items-center justify-between p-3 border rounded-lg">
+                  <div>
+                    <p className="font-medium">{drug.name}</p>
+                    <p className="text-sm text-muted-foreground">{drug.count} detections</p>
+                  </div>
+                  <div className="text-2xl font-bold text-primary">{index + 1}</div>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Detailed Reports Section */}
       <Card>
@@ -231,30 +388,30 @@ export default function ReportPage() {
           <div className="space-y-4">
             <div className="flex items-center justify-between p-4 border rounded-lg">
               <div>
-                <h3 className="font-medium">Monthly Recognition Report</h3>
+                <h3 className="font-medium">Recognition Performance Report</h3>
                 <p className="text-sm text-muted-foreground">Detailed analysis of recognition system performance</p>
               </div>
-              <Button variant="outline" size="sm">
+              <Button variant="outline" size="sm" onClick={() => handleExportReport('recognition')}>
                 <Download className="mr-2 h-4 w-4" />
                 Download
               </Button>
             </div>
             <div className="flex items-center justify-between p-4 border rounded-lg">
               <div>
-                <h3 className="font-medium">Patient Activity Report</h3>
-                <p className="text-sm text-muted-foreground">Patient interaction and prescription statistics</p>
+                <h3 className="font-medium">User Activity Report</h3>
+                <p className="text-sm text-muted-foreground">User interaction and prescription statistics</p>
               </div>
-              <Button variant="outline" size="sm">
+              <Button variant="outline" size="sm" onClick={() => handleExportReport('user_activity')}>
                 <Download className="mr-2 h-4 w-4" />
                 Download
               </Button>
             </div>
             <div className="flex items-center justify-between p-4 border rounded-lg">
               <div>
-                <h3 className="font-medium">System Performance Report</h3>
-                <p className="text-sm text-muted-foreground">System metrics and performance analytics</p>
+                <h3 className="font-medium">Drug Detection Report</h3>
+                <p className="text-sm text-muted-foreground">Drug detection patterns and statistics</p>
               </div>
-              <Button variant="outline" size="sm">
+              <Button variant="outline" size="sm" onClick={() => handleExportReport('drug_detection')}>
                 <Download className="mr-2 h-4 w-4" />
                 Download
               </Button>
