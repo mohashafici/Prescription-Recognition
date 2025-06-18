@@ -153,33 +153,97 @@ def update_password():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/users', methods=['GET'])
-def get_users():
+@app.route('/api/users', methods=['GET', 'POST'])
+def manage_users():
     try:
-        # Get all users from database with proper projection
-        users = list(users_collection.find(
-            {},  # empty filter to get all users
-            {
-                '_id': 1,
-                'name': 1,
-                'email': 1,
-                'role': 1,
-                'created_at': 1,
-                'status': 1
+        # Get user ID from token
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({'error': 'No authorization token provided'}), 401
+
+        token = auth_header.split(' ')[1]
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            user_id = payload['user_id']
+            
+            # Check if user is admin
+            user = users_collection.find_one({'_id': ObjectId(user_id)})
+            if not user or user.get('role') != 'admin':
+                return jsonify({'error': 'Unauthorized access'}), 403
+                
+        except jwt.InvalidTokenError:
+            return jsonify({'error': 'Invalid token'}), 401
+
+        if request.method == 'GET':
+            # Get all users from database with proper projection
+            users = list(users_collection.find(
+                {},  # empty filter to get all users
+                {
+                    '_id': 1,
+                    'name': 1,
+                    'email': 1,
+                    'role': 1,
+                    'created_at': 1,
+                    'status': 1
+                }
+            ))
+
+            # Convert ObjectId to string for JSON serialization
+            for user in users:
+                user['_id'] = str(user['_id'])
+                user['created_at'] = user['created_at'].isoformat()
+                # Set default status if not present
+                if 'status' not in user:
+                    user['status'] = 'active'
+
+            return jsonify({
+                'users': users
+            }), 200
+
+        elif request.method == 'POST':
+            # Create new user
+            data = request.get_json()
+            
+            # Validate required fields
+            required_fields = ['name', 'email', 'password', 'role']
+            for field in required_fields:
+                if field not in data:
+                    return jsonify({'error': f'{field} is required'}), 400
+
+            # Validate role
+            if data['role'] not in ['user', 'admin']:
+                return jsonify({'error': 'Invalid role. Must be "user" or "admin"'}), 400
+
+            # Check if email already exists
+            if users_collection.find_one({'email': data['email']}):
+                return jsonify({'error': 'Email already registered'}), 400
+
+            # Hash password
+            hashed_password = bcrypt.hashpw(data['password'].encode('utf-8'), bcrypt.gensalt())
+
+            # Create user document
+            new_user = {
+                'name': data['name'],
+                'email': data['email'],
+                'password': hashed_password,
+                'role': data['role'],
+                'status': 'active',
+                'created_at': datetime.utcnow()
             }
-        ))
 
-        # Convert ObjectId to string for JSON serialization
-        for user in users:
-            user['_id'] = str(user['_id'])
-            user['created_at'] = user['created_at'].isoformat()
-            # Set default status if not present
-            if 'status' not in user:
-                user['status'] = 'active'
+            # Insert user into database
+            result = users_collection.insert_one(new_user)
 
-        return jsonify({
-            'users': users
-        }), 200
+            return jsonify({
+                'message': 'User created successfully',
+                'user': {
+                    'id': str(result.inserted_id),
+                    'name': new_user['name'],
+                    'email': new_user['email'],
+                    'role': new_user['role'],
+                    'status': new_user['status']
+                }
+            }), 201
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -187,6 +251,24 @@ def get_users():
 @app.route('/api/users/<user_id>/status', methods=['PUT'])
 def update_user_status(user_id):
     try:
+        # Get user ID from token
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({'error': 'No authorization token provided'}), 401
+
+        token = auth_header.split(' ')[1]
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            admin_user_id = payload['user_id']
+            
+            # Check if user is admin
+            admin_user = users_collection.find_one({'_id': ObjectId(admin_user_id)})
+            if not admin_user or admin_user.get('role') != 'admin':
+                return jsonify({'error': 'Unauthorized access'}), 403
+                
+        except jwt.InvalidTokenError:
+            return jsonify({'error': 'Invalid token'}), 401
+
         data = request.get_json()
         
         # Validate required fields

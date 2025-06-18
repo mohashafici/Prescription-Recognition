@@ -74,16 +74,28 @@ export default function UsersPage() {
   const fetchUsers = async () => {
     try {
       setIsLoading(true)
-      const response = await fetch('http://localhost:5000/api/users')
-      if (!response.ok) {
-        throw new Error('Failed to fetch users')
+      const token = localStorage.getItem("token")
+      if (!token) {
+        throw new Error("No authentication token found")
       }
+
+      const response = await fetch('http://localhost:5000/api/users', {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      })
+      
+      if (!response.ok) {
+        const data = await response.json()
+        throw new Error(data.error || 'Failed to fetch users')
+      }
+      
       const data: UsersResponse = await response.json()
       setUsers(data.users)
     } catch (error) {
       toast({
         title: "Error",
-        description: "Failed to fetch users",
+        description: error instanceof Error ? error.message : "Failed to fetch users",
         variant: "destructive",
       })
     } finally {
@@ -95,6 +107,10 @@ export default function UsersPage() {
     e.preventDefault()
     try {
       const token = localStorage.getItem("token")
+      if (!token) {
+        throw new Error("No authentication token found")
+      }
+
       const response = await fetch("http://localhost:5000/api/users", {
         method: "POST",
         headers: {
@@ -104,11 +120,15 @@ export default function UsersPage() {
         body: JSON.stringify(newUser),
       })
 
-      if (!response.ok) throw new Error("Failed to add user")
+      if (!response.ok) {
+        const data = await response.json()
+        throw new Error(data.error || "Failed to add user")
+      }
 
+      const result = await response.json()
       toast({
         title: "Success",
-        description: "User added successfully",
+        description: result.message || "User added successfully",
       })
       setIsAddUserOpen(false)
       setNewUser({ name: "", email: "", password: "", role: "user" })
@@ -116,7 +136,7 @@ export default function UsersPage() {
     } catch (error) {
       toast({
         title: "Error",
-        description: "Failed to add user",
+        description: error instanceof Error ? error.message : "Failed to add user",
         variant: "destructive",
       })
     }
@@ -124,10 +144,16 @@ export default function UsersPage() {
 
   const handleStatusChange = async (userId: string, newStatus: "active" | "inactive") => {
     try {
+      const token = localStorage.getItem("token")
+      if (!token) {
+        throw new Error("No authentication token found")
+      }
+
       const response = await fetch(`http://localhost:5000/api/users/${userId}/status`, {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`,
         },
         body: JSON.stringify({ status: newStatus }),
       })
